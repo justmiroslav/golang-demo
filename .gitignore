@@ -1,1 +1,4 @@
 /golang-demo
+
+terraform/.terraform/
+terraform/.terraform.lock.hcl
