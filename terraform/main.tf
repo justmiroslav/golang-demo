@@ -81,6 +81,7 @@ resource "aws_security_group" "ec2" {
 }
 
 resource "aws_instance" "app" {
+  count         = 2
   ami           = "ami-08eb150f611ca277f"
   instance_type = "t3.micro"
   key_name      = var.key_name
@@ -137,11 +138,13 @@ resource "aws_instance" "app" {
               server {
                   listen 80 default_server;
                   listen [::]:80 default_server;
+                  add_header X-Instance-Info \$server_addr always;
 
                   location / {
                       proxy_pass http://localhost:8080;
                       proxy_set_header Host \$host;
                       proxy_set_header X-Real-IP \$remote_addr;
+                      proxy_set_header X-Instance-Info \$server_addr;
                   }
               }
               EOT
@@ -150,10 +153,82 @@ resource "aws_instance" "app" {
               EOF
 
   tags = {
-    Name = "app-instance"
+    Name = "app-instance-${count.index + 1}"
   }
 
   monitoring = false
+}
+
+resource "aws_lb" "app" {
+  name               = "app-lb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets           = aws_subnet.public[*].id
+
+  tags = {
+    Name = "app-lb"
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name        = "alb-sg"
+  description = "Security group for Application Load Balancer"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "alb-sg"
+  }
+}
+
+resource "aws_lb_target_group" "app" {
+  name     = "app-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher            = "200"
+    path               = "/"
+    port               = "traffic-port"
+    timeout            = 5
+    unhealthy_threshold = 2
+  }
+}
+
+resource "aws_lb_target_group_attachment" "app" {
+  count            = 2
+  target_group_arn = aws_lb_target_group.app.arn
+  target_id        = aws_instance.app[count.index].id
+  port             = 80
+}
+
+resource "aws_lb_listener" "app" {
+  load_balancer_arn = aws_lb.app.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
 }
 
 resource "aws_security_group" "rds" {
