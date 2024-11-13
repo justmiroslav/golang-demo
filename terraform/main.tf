@@ -55,19 +55,19 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "ec2" {
   name        = "ec2-sg"
-  description = "Security group for EC2 instance"
+  description = "Security group for EC2 instances in ASG"
   vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
 
   ingress {
     from_port   = 22
     to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -78,18 +78,24 @@ resource "aws_security_group" "ec2" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = {
+    Name = "ec2-sg"
+  }
 }
 
-resource "aws_instance" "app" {
-  count         = 2
-  ami           = "ami-08eb150f611ca277f"
+resource "aws_launch_template" "app" {
+  name_prefix   = "app-template"
+  image_id      = "ami-08eb150f611ca277f"
   instance_type = "t3.micro"
+
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups            = [aws_security_group.ec2.id]
+  }
+
   key_name      = var.key_name
-
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-  subnet_id              = aws_subnet.public[0].id
-
-  user_data = <<-EOF
+  user_data = base64encode(<<-EOF
               #!/bin/bash
               apt-get update
               apt-get install -y nginx golang git postgresql-client
@@ -151,12 +157,45 @@ resource "aws_instance" "app" {
 
               systemctl restart nginx
               EOF
+  )
 
-  tags = {
-    Name = "app-instance-${count.index + 1}"
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "app-instance"
+    }
   }
 
-  monitoring = false
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "app" {
+  name                = "app-asg"
+  desired_capacity    = 1
+  max_size            = 2
+  min_size            = 1
+  target_group_arns   = [aws_lb_target_group.app.arn]
+  vpc_zone_identifier = aws_subnet.public[*].id
+
+  launch_template {
+    id      = aws_launch_template.app.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "app-asg-instance"
+    propagate_at_launch = true
+  }
+
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_lb" "app" {
@@ -211,13 +250,6 @@ resource "aws_lb_target_group" "app" {
     timeout            = 5
     unhealthy_threshold = 2
   }
-}
-
-resource "aws_lb_target_group_attachment" "app" {
-  count            = 2
-  target_group_arn = aws_lb_target_group.app.arn
-  target_id        = aws_instance.app[count.index].id
-  port             = 80
 }
 
 resource "aws_lb_listener" "app" {
